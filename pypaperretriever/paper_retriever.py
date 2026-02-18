@@ -550,3 +550,7 @@ def main() -> None:
 
     retriever.download()
 
+
+if __name__ == '__main__':
+    main()
+
