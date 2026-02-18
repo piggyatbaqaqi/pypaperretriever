@@ -69,7 +69,7 @@ def mock_entrez_efetch_pmid(*args, **kwargs):
     data = BytesIO(data.encode())
     return Entrez.read(data)
 
-@patch('pypaperretriever.paper_retriever.requests.get', side_effect=mock_requests_get)
+@patch('pypaperretriever.http_client.requests.get', side_effect=mock_requests_get)
 @patch('pypaperretriever.utils.entrez_efetch', side_effect=mock_entrez_efetch_doi)
 def test_fetch_paper_with_doi(mock_efetch, mock_get, tmp_path):
     """
@@ -112,7 +112,7 @@ def test_fetch_paper_with_doi(mock_efetch, mock_get, tmp_path):
         assert json_data['pdf_filepath'].endswith(str(expected_pdf_path).replace(str(tmp_path), ""))
         assert json_data['open_access'] is True
 
-@patch('pypaperretriever.paper_retriever.requests.get', side_effect=mock_requests_get)
+@patch('pypaperretriever.http_client.requests.get', side_effect=mock_requests_get)
 @patch('pypaperretriever.utils.entrez_efetch', side_effect=mock_entrez_efetch_pmid)
 def test_fetch_paper_with_pmid(mock_efetch, mock_get, tmp_path):
     """
