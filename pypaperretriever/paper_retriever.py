@@ -164,7 +164,7 @@ class PaperRetriever:
 
         """
         pmc_id = None
-        id = self.pmid if self.pmid else doi_to_pmid(decode_doi(self.doi), self.email)
+        id = self.pmid if self.pmid else doi_to_pmid(decode_doi(self.doi), self.email, http_client=self._http_client)
         records = entrez_efetch(self.email, id)
         try:
             id_list = records['PubmedArticle'][0]['PubmedData']['ArticleIdList']

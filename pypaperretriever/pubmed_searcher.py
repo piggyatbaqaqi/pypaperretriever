@@ -11,6 +11,7 @@ from Bio import Entrez
 from tqdm import tqdm
 from typing import Self
 
+from .http_client import HttpClient
 from .image_extractor import ImageExtractor
 from .paper_retriever import PaperRetriever
 from .reference_retriever import ReferenceRetriever
@@ -32,13 +33,14 @@ class PubMedSearcher:
         email (str): Email address used for API calls.
     """
 
-    def __init__(self, search_string=None, df=None, email=""):
+    def __init__(self, search_string=None, df=None, email="", respect_robots_txt=False):
         """Initialize the searcher.
 
         Args:
             search_string (str | None): Query to submit to PubMed.
             df (pandas.DataFrame | None): Existing table of articles.
             email (str): Email address required by Entrez.
+            respect_robots_txt (bool): Respect robots.txt directives and Crawl-Delay.
         """
         self.search_string = search_string
         self.df = df if df is not None else pd.DataFrame()
@@ -51,6 +53,8 @@ class PubMedSearcher:
         else:
             print("Please provide an email address to use for querying PubMed.")
             raise ValueError("Email address is required for PubMed queries.")
+        self.respect_robots_txt = respect_robots_txt
+        self._http_client = HttpClient(respect_robots_txt=respect_robots_txt)
 
     def search(
         self,
@@ -159,7 +163,8 @@ class PubMedSearcher:
                                         doi=doi,
                                         email=self.email,
                                         allow_scihub=allow_scihub,
-                                        download_directory=download_directory
+                                        download_directory=download_directory,
+                                        respect_robots_txt=self.respect_robots_txt,
                                     ).download().filepath
             if pdf_filepath in [None, '', 'unavailable']:
                 self.df.at[index, 'download_complete'] = 'unavailable'
@@ -254,7 +259,7 @@ class PubMedSearcher:
                 continue
             
             # Initialize ReferenceRetriever with available identifiers
-            retriever = ReferenceRetriever(email=self.email, doi=row.get('doi'), pmid=row.get('pmid'), standardize=True)
+            retriever = ReferenceRetriever(email=self.email, doi=row.get('doi'), pmid=row.get('pmid'), standardize=True, http_client=self._http_client)
             references = retriever.fetch_references()
             
             # Store references or mark as "Not found" if empty
@@ -284,7 +289,7 @@ class PubMedSearcher:
                 continue
             
             # Initialize ReferenceRetriever with available identifiers
-            retriever = ReferenceRetriever(email=self.email, doi=row.get('doi'), pmid=row.get('pmid'))
+            retriever = ReferenceRetriever(email=self.email, doi=row.get('doi'), pmid=row.get('pmid'), http_client=self._http_client)
             cited_by = retriever.fetch_cited_by()  # Now uses both Europe PMC & PubMed
             
             # Store citing articles or mark as "Not found" if empty
@@ -444,17 +449,19 @@ class PubMedSearcher:
         print(url)
 
         try:
-            response = requests.get(url)
+            response = self._http_client.get(url)
+            if response is None:
+                return None
             if response.status_code == 200:
                 xml_content = response.text
                 os.makedirs(download_directory, exist_ok=True)
                 # Use filename_suffix if provided, else default to PMID
                 filename = f"{filename_suffix}.xml" if filename_suffix else f"{pmid}.xml"
                 file_path = os.path.join(download_directory, filename)
-                
+
                 with open(file_path, 'w', encoding='utf-8') as file:
                     file.write(xml_content)
-                
+
                 print(f"Article XML downloaded successfully to {file_path}.")
                 return file_path
             else:
@@ -563,7 +570,9 @@ class PubMedSearcher:
             "identifier": "oai:pubmedcentral.nih.gov:" + pmcid,
             "metadataPrefix": "pmc"
         }
-        response = requests.get(base_url, params=params)
+        response = self._http_client.get(base_url, params=params)
+        if response is None:
+            return None
 
         if response.status_code == 200:
             if 'is not supported by the item or by the repository.' in response.content.decode():

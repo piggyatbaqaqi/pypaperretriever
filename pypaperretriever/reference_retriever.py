@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 import requests
 from Bio import Entrez
 
 from .utils import doi_to_pmid
+
+if TYPE_CHECKING:
+    from .http_client import HttpClient
 
 
 class ReferenceRetriever:
@@ -19,14 +22,16 @@ class ReferenceRetriever:
         doi (str | None): Digital Object Identifier.
         pmid (str | None): PubMed identifier.
         standardize (bool): If ``True`` the output dictionaries share common keys.
+        http_client (HttpClient | None): Optional HTTP client for rate-limited requests.
     """
-    
+
     def __init__(
         self,
         email: str,
         doi: Optional[str] = None,
         pmid: Optional[str] = None,
         standardize: bool = True,
+        http_client: Optional[HttpClient] = None,
     ):
         """
         Initialize the retriever with either DOI or PMID.
@@ -35,18 +40,26 @@ class ReferenceRetriever:
             email (str): Email for API access
             doi (str, optional): Digital Object Identifier
             pmid (str, optional): PubMed ID
+            http_client (HttpClient, optional): HTTP client for rate-limited requests
         """
         self.email = email
         self.doi = doi
         self.pmid = pmid
         self.standardize = standardize
+        self._http_client = http_client
 
         print(f"[ReferenceRetriever] Initializing with DOI: {doi} and PMID: {pmid}")
 
         if self.doi and not self.pmid:
             print(f"[ReferenceRetriever] Converting DOI to PMID for DOI: {self.doi}")
-            self.pmid = doi_to_pmid(self.doi, self.email)
+            self.pmid = doi_to_pmid(self.doi, self.email, http_client=self._http_client)
             print(f"[ReferenceRetriever] Converted DOI {self.doi} to PMID: {self.pmid}")
+
+    def _do_get(self, url: str, **kwargs) -> requests.Response | None:
+        """Make a GET request, using the HTTP client if available."""
+        if self._http_client is not None:
+            return self._http_client.get(url, **kwargs)
+        return requests.get(url, **kwargs)
 
     def fetch_references(self) -> List[Dict[str, Any]]:
         """Fetch references for the current paper.
@@ -81,7 +94,7 @@ class ReferenceRetriever:
         if not self.pmid:
             if self.doi:
                 print(f"[ReferenceRetriever] Converting DOI to PMID for DOI: {self.doi}")
-                self.pmid = doi_to_pmid(self.doi, self.email)
+                self.pmid = doi_to_pmid(self.doi, self.email, http_client=self._http_client)
                 print(f"[ReferenceRetriever] Converted DOI {self.doi} to PMID: {self.pmid}")
                 if not self.pmid:
                     raise ValueError("Unable to convert DOI to PMID.")
@@ -112,7 +125,7 @@ class ReferenceRetriever:
                 print(f"[ReferenceRetriever] No metadata found for PMID: {self.pmid}")
         elif self.doi:
             print(f"[ReferenceRetriever] Fetching metadata using DOI: {self.doi}")
-            pmid = doi_to_pmid(self.doi, self.email)
+            pmid = doi_to_pmid(self.doi, self.email, http_client=self._http_client)
             if pmid:
                 print(f"[ReferenceRetriever] Converted DOI {self.doi} to PMID: {pmid}")
                 articles = self._fetch_articles_details([pmid])
@@ -185,7 +198,9 @@ class ReferenceRetriever:
         url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/MED/{pmid}/references?page=1&pageSize=1000&format=json"
         print(f"[ReferenceRetriever] Requesting Europe PMC references from URL: {url}")
         try:
-            response = requests.get(url)
+            response = self._do_get(url)
+            if response is None:
+                return []
             if response.status_code == 200:
                 data = response.json()
                 references = data.get('referenceList', {}).get('reference', [])
@@ -240,7 +255,9 @@ class ReferenceRetriever:
         url = f"https://api.crossref.org/works/{doi}"
         print(f"[ReferenceRetriever] Requesting CrossRef references from URL: {url}")
         try:
-            response = requests.get(url)
+            response = self._do_get(url)
+            if response is None:
+                return []
             if response.status_code == 200:
                 data = response.json()
                 references = data['message'].get('reference', [])
@@ -265,7 +282,9 @@ class ReferenceRetriever:
         url = f"https://www.ebi.ac.uk/europepmc/webservices/rest/MED/{pmid}/citations?format=json"
         print(f"[ReferenceRetriever] Requesting Europe PMC citing articles from URL: {url}")
         try:
-            response = requests.get(url)
+            response = self._do_get(url)
+            if response is None:
+                return []
             if response.status_code == 200:
                 data = response.json()
                 citations = data.get('citationList', {}).get('citation', [])
