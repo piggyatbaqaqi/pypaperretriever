@@ -1,4 +1,5 @@
-from unittest.mock import Mock, patch, MagicMock
+from datetime import datetime, timezone
+from unittest.mock import Mock, patch, MagicMock, call
 from urllib.robotparser import RobotFileParser
 
 import pytest
@@ -276,3 +277,168 @@ class TestHttpClientWithRobots:
         client.get("https://example.com/page2")
 
         mock_sleep.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# HttpClient tests — _handle_429 header parsing
+# ---------------------------------------------------------------------------
+
+class TestHandle429:
+    """Tests for _handle_429 header parsing logic."""
+
+    def _make_client(self, **kwargs):
+        return HttpClient(
+            honor_retry_after=True,
+            verbosity=0,
+            **kwargs,
+        )
+
+    def test_retry_after_integer_seconds(self):
+        client = self._make_client()
+        resp = Mock(headers={"Retry-After": "30"})
+        assert client._handle_429(resp, "https://example.com") == 30.0
+
+    def test_retry_after_http_date(self):
+        client = self._make_client()
+        # Use a date 45 seconds in the future
+        future = datetime.now(timezone.utc).timestamp() + 45
+        future_dt = datetime.fromtimestamp(future, tz=timezone.utc)
+        http_date = future_dt.strftime("%a, %d %b %Y %H:%M:%S GMT")
+        resp = Mock(headers={"Retry-After": http_date})
+        wait = client._handle_429(resp, "https://example.com")
+        # Allow 2s tolerance for test execution time
+        assert 43 <= wait <= 47
+
+    def test_ratelimit_reset_as_seconds(self):
+        client = self._make_client()
+        resp = Mock(headers={"RateLimit-Reset": "120"})
+        assert client._handle_429(resp, "https://example.com") == 120.0
+
+    @patch("pypaperretriever.http_client.time.time", return_value=1700000000.0)
+    def test_ratelimit_reset_as_unix_timestamp(self, _mock_time):
+        client = self._make_client()
+        resp = Mock(headers={"RateLimit-Reset": "1700000090"})
+        wait = client._handle_429(resp, "https://example.com")
+        assert abs(wait - 90.0) < 1.0
+
+    def test_x_ratelimit_reset_fallback(self):
+        client = self._make_client()
+        resp = Mock(headers={"X-RateLimit-Reset": "25"})
+        assert client._handle_429(resp, "https://example.com") == 25.0
+
+    def test_ratelimit_reset_preferred_over_x(self):
+        client = self._make_client()
+        resp = Mock(headers={
+            "RateLimit-Reset": "10",
+            "X-RateLimit-Reset": "99",
+        })
+        assert client._handle_429(resp, "https://example.com") == 10.0
+
+    def test_retry_after_preferred_over_ratelimit_reset(self):
+        client = self._make_client()
+        resp = Mock(headers={
+            "Retry-After": "5",
+            "RateLimit-Reset": "99",
+        })
+        assert client._handle_429(resp, "https://example.com") == 5.0
+
+    def test_default_fallback_when_no_headers(self):
+        client = self._make_client(default_retry_after_s=60.0)
+        resp = Mock(headers={})
+        assert client._handle_429(resp, "https://example.com") == 60.0
+
+    def test_custom_default_fallback(self):
+        client = self._make_client(default_retry_after_s=30.0)
+        resp = Mock(headers={})
+        assert client._handle_429(resp, "https://example.com") == 30.0
+
+    def test_max_retry_after_clamps_value(self):
+        client = self._make_client(max_retry_after_s=10.0)
+        resp = Mock(headers={"Retry-After": "600"})
+        assert client._handle_429(resp, "https://example.com") == 10.0
+
+    def test_unparseable_retry_after_falls_through(self):
+        client = self._make_client(default_retry_after_s=60.0)
+        resp = Mock(headers={"Retry-After": "not-a-number-or-date"})
+        assert client._handle_429(resp, "https://example.com") == 60.0
+
+
+# ---------------------------------------------------------------------------
+# HttpClient tests — 429 retry integration in get()
+# ---------------------------------------------------------------------------
+
+class TestHttpClient429Retry:
+    """Tests for the retry loop in HttpClient.get()."""
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_retries_on_429_then_succeeds(self, mock_get, _mock_time, mock_sleep):
+        resp_429 = Mock(status_code=429, headers={"Retry-After": "2"})
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.side_effect = [resp_429, resp_200]
+
+        client = HttpClient(honor_retry_after=True, verbosity=0)
+        resp = client.get("https://example.com/page")
+
+        assert resp.status_code == 200
+        assert mock_get.call_count == 2
+        mock_sleep.assert_called_once_with(2.0)
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_gives_up_after_max_retries(self, mock_get, _mock_time, mock_sleep):
+        resp_429 = Mock(status_code=429, headers={"Retry-After": "1"})
+        mock_get.return_value = resp_429
+
+        client = HttpClient(honor_retry_after=True, max_retries=3, verbosity=0)
+        resp = client.get("https://example.com/page")
+
+        assert resp.status_code == 429
+        # 1 initial + 3 retries = 4 calls
+        assert mock_get.call_count == 4
+        assert mock_sleep.call_count == 3
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_no_retry_when_disabled(self, mock_get, _mock_time, mock_sleep):
+        resp_429 = Mock(status_code=429, headers={"Retry-After": "5"})
+        mock_get.return_value = resp_429
+
+        client = HttpClient(honor_retry_after=False, verbosity=0)
+        resp = client.get("https://example.com/page")
+
+        assert resp.status_code == 429
+        mock_get.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_no_retry_on_non_429(self, mock_get, _mock_time, mock_sleep):
+        resp_500 = Mock(status_code=500, headers={})
+        mock_get.return_value = resp_500
+
+        client = HttpClient(honor_retry_after=True, verbosity=0)
+        resp = client.get("https://example.com/page")
+
+        assert resp.status_code == 500
+        mock_get.assert_called_once()
+        mock_sleep.assert_not_called()
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_multiple_429s_then_success(self, mock_get, _mock_time, mock_sleep):
+        resp_429 = Mock(status_code=429, headers={"Retry-After": "1"})
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.side_effect = [resp_429, resp_429, resp_200]
+
+        client = HttpClient(honor_retry_after=True, max_retries=3, verbosity=0)
+        resp = client.get("https://example.com/page")
+
+        assert resp.status_code == 200
+        assert mock_get.call_count == 3
+        assert mock_sleep.call_count == 2
