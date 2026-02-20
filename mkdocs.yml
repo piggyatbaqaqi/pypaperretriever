@@ -63,7 +63,7 @@ nav:
       - PaperTracker: api/paper_tracker.md
       - Utils: api/utils.md
       - CLI: api/cli.md
-  - HTTP Client & robots.txt: http_client.md
+  - HTTP Client & Polite Crawling: http_client.md
   - FAQ: faq.md
 
 extra:
