@@ -442,3 +442,132 @@ class TestHttpClient429Retry:
         assert resp.status_code == 200
         assert mock_get.call_count == 3
         assert mock_sleep.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# HttpClient tests — 403 domain suppression
+# ---------------------------------------------------------------------------
+
+class TestHttpClient403Suppression:
+    """Tests for the 403 domain suppression feature."""
+
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_403_suppresses_domain(self, mock_get, _mock_time):
+        resp_403 = Mock(status_code=403, headers={})
+        resp_403.url = "https://publisher.com/article/1"
+        mock_get.return_value = resp_403
+
+        client = HttpClient(suppress_on_403=True, verbosity=0)
+        resp1 = client.get("https://publisher.com/article/1")
+
+        assert resp1.status_code == 403
+        assert mock_get.call_count == 1
+
+        # Second request to the same domain should be short-circuited
+        resp2 = client.get("https://publisher.com/article/2")
+
+        assert resp2.status_code == 403
+        assert resp2.url == "https://publisher.com/article/2"
+        # Still only 1 real network call
+        assert mock_get.call_count == 1
+
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_403_does_not_suppress_different_domain(self, mock_get, _mock_time):
+        resp_403 = Mock(status_code=403, headers={})
+        resp_403.url = "https://publisher-a.com/page"
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.side_effect = [resp_403, resp_200]
+
+        client = HttpClient(suppress_on_403=True, verbosity=0)
+        client.get("https://publisher-a.com/page")
+        resp2 = client.get("https://publisher-b.com/page")
+
+        assert resp2.status_code == 200
+        assert mock_get.call_count == 2
+
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_suppression_disabled(self, mock_get, _mock_time):
+        resp_403 = Mock(status_code=403, headers={})
+        resp_403.url = "https://publisher.com/article/1"
+        mock_get.return_value = resp_403
+
+        client = HttpClient(suppress_on_403=False, verbosity=0)
+        client.get("https://publisher.com/article/1")
+        client.get("https://publisher.com/article/2")
+
+        # Both requests should hit the network
+        assert mock_get.call_count == 2
+
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_doi_org_not_suppressed(self, mock_get, _mock_time):
+        resp_403 = Mock(status_code=403, headers={})
+        resp_403.url = "https://doi.org/10.1234/test"
+        mock_get.return_value = resp_403
+
+        client = HttpClient(suppress_on_403=True, verbosity=0)
+        client.get("https://doi.org/10.1234/test")
+        client.get("https://doi.org/10.5678/other")
+
+        # doi.org is exempt — both requests should hit the network
+        assert mock_get.call_count == 2
+        assert client.suppressed_domains == {}
+
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_dx_doi_org_not_suppressed(self, mock_get, _mock_time):
+        resp_403 = Mock(status_code=403, headers={})
+        resp_403.url = "https://dx.doi.org/10.1234/test"
+        mock_get.return_value = resp_403
+
+        client = HttpClient(suppress_on_403=True, verbosity=0)
+        client.get("https://dx.doi.org/10.1234/test")
+        client.get("https://dx.doi.org/10.5678/other")
+
+        assert mock_get.call_count == 2
+        assert client.suppressed_domains == {}
+
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_200_does_not_suppress(self, mock_get, _mock_time):
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.return_value = resp_200
+
+        client = HttpClient(suppress_on_403=True, verbosity=0)
+        client.get("https://publisher.com/article/1")
+        client.get("https://publisher.com/article/2")
+
+        assert mock_get.call_count == 2
+        assert client.suppressed_domains == {}
+
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_suppressed_domains_property(self, mock_get, _mock_time):
+        resp_403 = Mock(status_code=403, headers={})
+        resp_403.url = "https://blocked.com/x"
+        mock_get.return_value = resp_403
+
+        client = HttpClient(suppress_on_403=True, verbosity=0)
+        client.get("https://blocked.com/x")
+
+        domains = client.suppressed_domains
+        assert "https://blocked.com" in domains
+        assert "403 Forbidden" in domains["https://blocked.com"]
+
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_synthetic_403_has_correct_url(self, mock_get, _mock_time):
+        resp_403 = Mock(status_code=403, headers={})
+        resp_403.url = "https://publisher.com/article/1"
+        mock_get.return_value = resp_403
+
+        client = HttpClient(suppress_on_403=True, verbosity=0)
+        client.get("https://publisher.com/article/1")
+
+        # Synthetic response should carry the new URL
+        resp2 = client.get("https://publisher.com/article/99")
+        assert resp2.status_code == 403
+        assert resp2.url == "https://publisher.com/article/99"

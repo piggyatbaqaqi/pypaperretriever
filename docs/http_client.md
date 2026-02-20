@@ -1,16 +1,18 @@
 # HTTP Client & Polite Crawling
 
-PyPaperRetriever includes an `HttpClient` that wraps `requests.get()` with two
-opt-in politeness features:
+PyPaperRetriever includes an `HttpClient` that wraps `requests.get()` with
+three features for polite and efficient crawling:
 
 1. **robots.txt / Crawl-Delay** — check each domain's `robots.txt` before
    fetching and respect its `Crawl-Delay` directive.
 2. **HTTP 429 retry** — automatically wait and retry when a server replies with
    *429 Too Many Requests*.
+3. **403 domain suppression** — remember domains that return *403 Forbidden*
+   and short-circuit subsequent requests to the same domain, avoiding redundant
+   network round-trips during bulk downloads.
 
-By default robots.txt support is **off** (zero overhead) while 429 retry is
-**on** (safe default — it only activates when a server explicitly asks you to
-slow down).
+By default robots.txt support is **off** (zero overhead) while 429 retry and
+403 suppression are **on**.
 
 ## Quick examples
 
@@ -113,6 +115,55 @@ client = HttpClient(honor_retry_after=False)
 
 ---
 
+## 403 Forbidden domain suppression
+
+When `suppress_on_403=True` (the default) and a server responds with **403
+Forbidden**, `HttpClient` records that domain in an internal blocklist.  All
+subsequent requests to the same domain are immediately returned as a synthetic
+403 response *without making a network request*.  This dramatically speeds up
+bulk downloads where certain publishers consistently deny access.
+
+### Exempt domains
+
+Some domains — notably `doi.org` and `dx.doi.org` — act purely as redirectors.
+A 403 from `doi.org` actually originates at the *destination* publisher, not at
+`doi.org` itself.  These domains are **exempt** from suppression and will never
+be blocklisted.
+
+### Inspecting the blocklist
+
+The `suppressed_domains` property returns a copy of the current blocklist:
+
+```python
+client = HttpClient()
+# ... after some requests ...
+for domain, reason in client.suppressed_domains.items():
+    print(f"{domain}: {reason}")
+```
+
+### Disabling 403 suppression
+
+Pass `suppress_on_403=False` or use the CLI flag `--no-suppress-403`:
+
+```python
+from pypaperretriever import PaperRetriever
+
+retriever = PaperRetriever(
+    email="you@example.com",
+    doi="10.7759/cureus.76081",
+    suppress_on_403=False,
+)
+```
+
+```bash
+pypaperretriever \
+    --email you@example.com \
+    --doi 10.7759/cureus.76081 \
+    --no-suppress-403
+```
+
+---
+
 ## Using `HttpClient` directly
 
 You can instantiate `HttpClient` on its own for custom workflows:
@@ -148,6 +199,7 @@ else:
 | `user_agent` | `str` | `"PyPaperRetriever/1.0"` | Default `User-Agent` header and the name used for robots.txt look-ups. |
 | `respect_robots_txt` | `bool` | `False` | Enable robots.txt checking and Crawl-Delay enforcement. |
 | `honor_retry_after` | `bool` | `True` | Automatically retry on HTTP 429 responses. |
+| `suppress_on_403` | `bool` | `True` | Suppress domains that return 403 Forbidden. |
 | `max_retries` | `int` | `3` | Maximum number of 429 retries per request. |
 | `default_retry_after_s` | `float` | `60.0` | Fallback wait (seconds) when no rate-limit header is present. |
 | `max_retry_after_s` | `float` | `300.0` | Upper clamp on the server-requested wait time. |
@@ -165,6 +217,8 @@ else:
 - When `respect_robots_txt=False`, `get()` never returns `None`.
 - If 429 retry is enabled and the server keeps responding with 429 after
   `max_retries` attempts, the final 429 response is returned (not `None`).
+- If 403 suppression is enabled and the domain was previously blocked, a
+  synthetic `requests.Response` with status 403 is returned (not `None`).
 
 ---
 
@@ -174,13 +228,13 @@ else:
 
 | Class | How it's configured |
 |-------|---------------------|
-| `PaperRetriever` | Accepts `respect_robots_txt` constructor parameter; creates its own `HttpClient`. |
+| `PaperRetriever` | Accepts `respect_robots_txt` and `suppress_on_403` constructor parameters; creates its own `HttpClient`. |
 | `PubMedSearcher` | Accepts `respect_robots_txt`; creates its own `HttpClient` and passes the flag through to `PaperRetriever` and `ReferenceRetriever`. |
 | `ReferenceRetriever` | Accepts an optional `http_client` parameter. |
 | `utils.doi_to_pmid()` | Accepts an optional `http_client` parameter for its PMC ID Converter fallback request. |
 
-All classes benefit from 429 retry automatically (it is on by default in every
-`HttpClient` instance).
+All classes benefit from 429 retry and 403 suppression automatically (both are
+on by default in every `HttpClient` instance).
 
 ---
 
@@ -199,4 +253,5 @@ All classes benefit from 429 retry automatically (it is on by default in every
       members:
         - __init__
         - get
+        - suppressed_domains
       inherited_members: false
