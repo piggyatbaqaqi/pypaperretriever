@@ -499,7 +499,9 @@ class TestHandle429:
     def test_retry_after_integer_seconds(self):
         client = self._make_client()
         resp = Mock(headers={"Retry-After": "30"})
-        assert client._handle_429(resp, "https://example.com") == 30.0
+        wait, found = client._handle_429(resp, "https://example.com")
+        assert wait == 30.0
+        assert found is True
 
     def test_retry_after_http_date(self):
         client = self._make_client()
@@ -508,26 +510,32 @@ class TestHandle429:
         future_dt = datetime.fromtimestamp(future, tz=timezone.utc)
         http_date = future_dt.strftime("%a, %d %b %Y %H:%M:%S GMT")
         resp = Mock(headers={"Retry-After": http_date})
-        wait = client._handle_429(resp, "https://example.com")
+        wait, found = client._handle_429(resp, "https://example.com")
         # Allow 2s tolerance for test execution time
         assert 43 <= wait <= 47
+        assert found is True
 
     def test_ratelimit_reset_as_seconds(self):
         client = self._make_client()
         resp = Mock(headers={"RateLimit-Reset": "120"})
-        assert client._handle_429(resp, "https://example.com") == 120.0
+        wait, found = client._handle_429(resp, "https://example.com")
+        assert wait == 120.0
+        assert found is True
 
     @patch("pypaperretriever.http_client.time.time", return_value=1700000000.0)
     def test_ratelimit_reset_as_unix_timestamp(self, _mock_time):
         client = self._make_client()
         resp = Mock(headers={"RateLimit-Reset": "1700000090"})
-        wait = client._handle_429(resp, "https://example.com")
+        wait, found = client._handle_429(resp, "https://example.com")
         assert abs(wait - 90.0) < 1.0
+        assert found is True
 
     def test_x_ratelimit_reset_fallback(self):
         client = self._make_client()
         resp = Mock(headers={"X-RateLimit-Reset": "25"})
-        assert client._handle_429(resp, "https://example.com") == 25.0
+        wait, found = client._handle_429(resp, "https://example.com")
+        assert wait == 25.0
+        assert found is True
 
     def test_ratelimit_reset_preferred_over_x(self):
         client = self._make_client()
@@ -535,7 +543,9 @@ class TestHandle429:
             "RateLimit-Reset": "10",
             "X-RateLimit-Reset": "99",
         })
-        assert client._handle_429(resp, "https://example.com") == 10.0
+        wait, found = client._handle_429(resp, "https://example.com")
+        assert wait == 10.0
+        assert found is True
 
     def test_retry_after_preferred_over_ratelimit_reset(self):
         client = self._make_client()
@@ -543,27 +553,37 @@ class TestHandle429:
             "Retry-After": "5",
             "RateLimit-Reset": "99",
         })
-        assert client._handle_429(resp, "https://example.com") == 5.0
+        wait, found = client._handle_429(resp, "https://example.com")
+        assert wait == 5.0
+        assert found is True
 
     def test_default_fallback_when_no_headers(self):
         client = self._make_client(default_retry_after_s=60.0)
         resp = Mock(headers={})
-        assert client._handle_429(resp, "https://example.com") == 60.0
+        wait, found = client._handle_429(resp, "https://example.com")
+        assert wait == 60.0
+        assert found is False
 
     def test_custom_default_fallback(self):
         client = self._make_client(default_retry_after_s=30.0)
         resp = Mock(headers={})
-        assert client._handle_429(resp, "https://example.com") == 30.0
+        wait, found = client._handle_429(resp, "https://example.com")
+        assert wait == 30.0
+        assert found is False
 
     def test_max_retry_after_clamps_value(self):
         client = self._make_client(max_retry_after_s=10.0)
         resp = Mock(headers={"Retry-After": "600"})
-        assert client._handle_429(resp, "https://example.com") == 10.0
+        wait, found = client._handle_429(resp, "https://example.com")
+        assert wait == 10.0
+        assert found is True
 
     def test_unparseable_retry_after_falls_through(self):
         client = self._make_client(default_retry_after_s=60.0)
         resp = Mock(headers={"Retry-After": "not-a-number-or-date"})
-        assert client._handle_429(resp, "https://example.com") == 60.0
+        wait, found = client._handle_429(resp, "https://example.com")
+        assert wait == 60.0
+        assert found is False
 
 
 # ---------------------------------------------------------------------------
@@ -774,3 +794,252 @@ class TestHttpClient403Suppression:
         resp2 = client.get("https://publisher.com/article/99")
         assert resp2.status_code == 403
         assert resp2.url == "https://publisher.com/article/99"
+
+
+# ---------------------------------------------------------------------------
+# HttpClient tests — exponential backoff
+# ---------------------------------------------------------------------------
+
+class TestHttpClientBackoff:
+    """Tests for exponential backoff on 503, 504, and 429-without-headers."""
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_backoff_on_503(self, mock_get, _mock_time, mock_sleep):
+        resp_503 = Mock(status_code=503, headers={})
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.side_effect = [resp_503, resp_200]
+
+        client = HttpClient(backoff_base_s=2.0, verbosity=0)
+        resp = client.get("https://example.com/page")
+
+        assert resp.status_code == 200
+        assert mock_get.call_count == 2
+        mock_sleep.assert_called_once_with(2.0)
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_backoff_on_504(self, mock_get, _mock_time, mock_sleep):
+        resp_504 = Mock(status_code=504, headers={})
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.side_effect = [resp_504, resp_200]
+
+        client = HttpClient(backoff_base_s=3.0, verbosity=0)
+        resp = client.get("https://example.com/page")
+
+        assert resp.status_code == 200
+        assert mock_get.call_count == 2
+        mock_sleep.assert_called_once_with(3.0)
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_backoff_on_429_no_headers(self, mock_get, _mock_time, mock_sleep):
+        resp_429 = Mock(status_code=429, headers={})
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.side_effect = [resp_429, resp_200]
+
+        client = HttpClient(
+            backoff_base_s=5.0,
+            default_retry_after_s=2.0,
+            verbosity=0,
+        )
+        resp = client.get("https://example.com/page")
+
+        assert resp.status_code == 200
+        # Backoff (5.0) > default (2.0) → wait = max(2.0, 5.0) = 5.0
+        mock_sleep.assert_called_once_with(5.0)
+        # Backoff should be active for the domain
+        assert "https://example.com" in client.backoff_delays
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_no_backoff_on_429_with_headers(self, mock_get, _mock_time, mock_sleep):
+        resp_429 = Mock(status_code=429, headers={"Retry-After": "10"})
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.side_effect = [resp_429, resp_200]
+
+        client = HttpClient(backoff_base_s=2.0, verbosity=0)
+        resp = client.get("https://example.com/page")
+
+        assert resp.status_code == 200
+        mock_sleep.assert_called_once_with(10.0)
+        # No backoff should have been registered
+        assert client.backoff_delays == {}
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_backoff_exponential_increase(self, mock_get, _mock_time, mock_sleep):
+        """Verify backoff doubles: base=1, mult=2 → 1, 2, 4."""
+        resp_503 = Mock(status_code=503, headers={})
+        mock_get.return_value = resp_503
+
+        client = HttpClient(
+            backoff_base_s=1.0,
+            backoff_multiplier=2.0,
+            max_retries=3,
+            verbosity=0,
+        )
+        client.get("https://example.com/page")
+
+        # 3 retries → 3 sleep calls: 1.0, 2.0, 4.0
+        assert mock_sleep.call_count == 3
+        sleeps = [c[0][0] for c in mock_sleep.call_args_list]
+        assert sleeps == [1.0, 2.0, 4.0]
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_backoff_capped_at_max(self, mock_get, _mock_time, mock_sleep):
+        resp_503 = Mock(status_code=503, headers={})
+        mock_get.return_value = resp_503
+
+        client = HttpClient(
+            backoff_base_s=100.0,
+            backoff_multiplier=2.0,
+            backoff_max_s=150.0,
+            max_retries=3,
+            verbosity=0,
+        )
+        client.get("https://example.com/page")
+
+        sleeps = [c[0][0] for c in mock_sleep.call_args_list]
+        # 100, min(200, 150)=150, min(300, 150)=150
+        assert sleeps == [100.0, 150.0, 150.0]
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_backoff_decreases_on_success(self, mock_get, _mock_time, mock_sleep):
+        """After 503s set backoff=4.0, a 200 should decrease it by decay."""
+        resp_503 = Mock(status_code=503, headers={})
+        resp_200 = Mock(status_code=200, headers={})
+
+        client = HttpClient(
+            backoff_base_s=2.0,
+            backoff_multiplier=2.0,
+            backoff_decay_s=1.0,
+            max_retries=2,
+            verbosity=0,
+        )
+
+        # First call: 503 → retry (503) → retry (503) — give up
+        mock_get.return_value = resp_503
+        client.get("https://example.com/page")
+        # Two increases: 2.0 → 4.0, plus the initial 503 triggers a third
+        # Loop: attempt 0 → increase to 2.0, attempt 1 → increase to 4.0
+        assert client._backoff_delays["https://example.com"] == 4.0
+
+        # Second call: 200 → backoff decreases by 1.0
+        mock_get.return_value = resp_200
+        client.get("https://example.com/page2")
+        assert client._backoff_delays["https://example.com"] == 3.0
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_backoff_clears_at_zero(self, mock_get, _mock_time, mock_sleep):
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.return_value = resp_200
+
+        client = HttpClient(backoff_decay_s=1.0, verbosity=0)
+        # Manually set a small backoff
+        client._backoff_delays["https://example.com"] = 0.5
+
+        client.get("https://example.com/page")
+
+        # 0.5 - 1.0 <= 0 → cleared
+        assert "https://example.com" not in client._backoff_delays
+        assert client.backoff_delays == {}
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_backoff_overrides_delay_lower_bound(
+        self, mock_get, _mock_time, mock_sleep
+    ):
+        """Backoff of 10s should override delay_min_s=1, giving range [10, 10]."""
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.return_value = resp_200
+
+        client = HttpClient(
+            delay_min_s=1.0,
+            delay_max_s=5.0,
+            backoff_decay_s=0.1,  # small decay to keep backoff active
+            verbosity=0,
+        )
+        # Inject a backoff state
+        client._backoff_delays["https://example.com"] = 10.0
+        # Seed a previous fetch time so rate limiter fires
+        client._last_fetch_times["https://example.com"] = 100.0
+
+        client.get("https://example.com/page")
+
+        # Rate limiter should have slept with lower bound = 10
+        mock_sleep.assert_called_once()
+        actual_sleep = mock_sleep.call_args[0][0]
+        assert abs(actual_sleep - 10.0) < 0.01
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_backoff_per_domain_independence(
+        self, mock_get, _mock_time, mock_sleep
+    ):
+        resp_503 = Mock(status_code=503, headers={})
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.side_effect = [resp_503, resp_200, resp_200]
+
+        client = HttpClient(backoff_base_s=5.0, verbosity=0)
+
+        # Domain A gets 503 → backoff set
+        client.get("https://a.example.com/page")
+        assert "https://a.example.com" in client.backoff_delays
+
+        # Domain B gets 200 → no backoff
+        client.get("https://b.example.com/page")
+        assert "https://b.example.com" not in client.backoff_delays
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_backoff_delays_property(self, mock_get, _mock_time, mock_sleep):
+        resp_503 = Mock(status_code=503, headers={})
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.side_effect = [resp_503, resp_200]
+
+        # Set decay=0 so the successful retry doesn't decrease the backoff
+        client = HttpClient(backoff_base_s=3.0, backoff_decay_s=0.0, verbosity=0)
+        client.get("https://example.com/page")
+
+        delays = client.backoff_delays
+        assert "https://example.com" in delays
+        assert delays["https://example.com"] == 3.0
+        # Property returns a copy
+        delays["https://example.com"] = 999.0
+        assert client.backoff_delays["https://example.com"] == 3.0
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time", return_value=100.0)
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_503_504_retry_then_success(self, mock_get, _mock_time, mock_sleep):
+        """Mixed 503/504 retries eventually succeed."""
+        resp_503 = Mock(status_code=503, headers={})
+        resp_504 = Mock(status_code=504, headers={})
+        resp_200 = Mock(status_code=200, headers={})
+        mock_get.side_effect = [resp_503, resp_504, resp_200]
+
+        client = HttpClient(
+            backoff_base_s=1.0, backoff_multiplier=2.0, max_retries=3,
+            verbosity=0,
+        )
+        resp = client.get("https://example.com/page")
+
+        assert resp.status_code == 200
+        assert mock_get.call_count == 3
+        sleeps = [c[0][0] for c in mock_sleep.call_args_list]
+        assert sleeps == [1.0, 2.0]
