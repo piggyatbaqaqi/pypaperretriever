@@ -1,18 +1,20 @@
 # HTTP Client & Polite Crawling
 
 PyPaperRetriever includes an `HttpClient` that wraps `requests.get()` with
-three features for polite and efficient crawling:
+four features for polite and efficient crawling:
 
 1. **robots.txt / Crawl-Delay** — check each domain's `robots.txt` before
    fetching and respect its `Crawl-Delay` directive.
-2. **HTTP 429 retry** — automatically wait and retry when a server replies with
+2. **Inter-request delay** — insert a random per-domain delay between
+   consecutive requests, independently of robots.txt.
+3. **HTTP 429 retry** — automatically wait and retry when a server replies with
    *429 Too Many Requests*.
-3. **403 domain suppression** — remember domains that return *403 Forbidden*
+4. **403 domain suppression** — remember domains that return *403 Forbidden*
    and short-circuit subsequent requests to the same domain, avoiding redundant
    network round-trips during bulk downloads.
 
-By default robots.txt support is **off** (zero overhead) while 429 retry and
-403 suppression are **on**.
+By default robots.txt support and inter-request delays are **off** (zero
+overhead) while 429 retry and 403 suppression are **on**.
 
 ## Quick examples
 
@@ -69,6 +71,50 @@ used instead.
 
 Delays are tracked **per domain** — a slow Crawl-Delay on one site does not
 block requests to a different site.
+
+---
+
+## Inter-request delay
+
+You can insert a random per-domain delay between consecutive requests by
+setting `delay_min_s` and/or `delay_max_s`.  This is useful for being polite
+to servers that don't publish a `Crawl-Delay` in their `robots.txt`.
+
+### Enabling delays
+
+Set either or both bounds.  The other bound is derived automatically:
+
+| You set | Resolved range |
+|---------|---------------|
+| `delay_min_s=1.0, delay_max_s=5.0` | 1–5 s |
+| `delay_min_s=2.0` (only) | 2–6 s (max = 3 × min) |
+| `delay_max_s=4.0` (only) | 0–4 s (min = 0) |
+| Neither (default) | Off — no delay |
+
+```python
+from pypaperretriever import HttpClient
+
+client = HttpClient(delay_min_s=1.0, delay_max_s=3.0)
+```
+
+### Interaction with Crawl-Delay
+
+When both an explicit delay range and `respect_robots_txt=True` are active,
+a `Crawl-Delay` directive **overrides the lower bound** of the delay range.
+If the `Crawl-Delay` is larger than the configured minimum, it raises the
+floor (and the ceiling if necessary so that max ≥ min).  If the `Crawl-Delay`
+is smaller than the configured minimum, it has no effect.
+
+| Config | Crawl-Delay | Effective range |
+|--------|-------------|-----------------|
+| `delay_min_s=1, delay_max_s=5` | 3 s | 3–5 s |
+| `delay_min_s=1, delay_max_s=5` | 0.5 s | 1–5 s (unchanged) |
+| `delay_min_s=1, delay_max_s=3` | 10 s | 10–10 s |
+| No explicit delay | 5 s | 5–5 s (fixed) |
+| No explicit delay | None | `rate_limit_min_s`–`rate_limit_max_s` fallback |
+
+Delays are tracked **per domain** — a slow delay on one site does not block
+requests to a different site.
 
 ---
 
@@ -174,6 +220,8 @@ from pypaperretriever import HttpClient
 client = HttpClient(
     user_agent="MyBot/1.0",
     respect_robots_txt=True,
+    delay_min_s=1.0,
+    delay_max_s=3.0,
     honor_retry_after=True,
     max_retries=5,
     default_retry_after_s=30.0,
@@ -198,6 +246,8 @@ else:
 |-----------|------|---------|-------------|
 | `user_agent` | `str` | `"PyPaperRetriever/1.0"` | Default `User-Agent` header and the name used for robots.txt look-ups. |
 | `respect_robots_txt` | `bool` | `False` | Enable robots.txt checking and Crawl-Delay enforcement. |
+| `delay_min_s` | `Optional[float]` | `None` | Minimum inter-request delay (seconds).  Setting this or `delay_max_s` enables per-domain delays.  If only `delay_max_s` is given, defaults to `0`. |
+| `delay_max_s` | `Optional[float]` | `None` | Maximum inter-request delay (seconds).  If only `delay_min_s` is given, defaults to `3 × delay_min_s`. |
 | `honor_retry_after` | `bool` | `True` | Automatically retry on HTTP 429 responses. |
 | `suppress_on_403` | `bool` | `True` | Suppress domains that return 403 Forbidden. |
 | `max_retries` | `int` | `3` | Maximum number of 429 retries per request. |

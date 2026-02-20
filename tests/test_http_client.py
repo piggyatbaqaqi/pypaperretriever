@@ -280,6 +280,209 @@ class TestHttpClientWithRobots:
 
 
 # ---------------------------------------------------------------------------
+# HttpClient tests — explicit inter-request delay
+# ---------------------------------------------------------------------------
+
+class TestHttpClientDelay:
+    """Tests for the delay_min_s / delay_max_s feature."""
+
+    def test_delay_disabled_by_default(self):
+        client = HttpClient(verbosity=0)
+        assert client.delay_min_s is None
+        assert client.delay_max_s is None
+        assert client._delay_enabled is False
+
+    def test_both_bounds_set(self):
+        client = HttpClient(delay_min_s=1.0, delay_max_s=5.0, verbosity=0)
+        assert client.delay_min_s == 1.0
+        assert client.delay_max_s == 5.0
+
+    def test_only_min_set_derives_max(self):
+        client = HttpClient(delay_min_s=2.0, verbosity=0)
+        assert client.delay_min_s == 2.0
+        assert client.delay_max_s == 6.0  # 3 * 2.0
+
+    def test_only_max_set_derives_min(self):
+        client = HttpClient(delay_max_s=4.0, verbosity=0)
+        assert client.delay_min_s == 0.0
+        assert client.delay_max_s == 4.0
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time")
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_delay_applied_between_requests(
+        self, mock_get, mock_time, mock_sleep
+    ):
+        mock_get.return_value = Mock(status_code=200)
+        # First call at t=100, second call immediately at t=100
+        mock_time.side_effect = [100.0, 100.0, 100.0]
+        client = HttpClient(
+            delay_min_s=2.0, delay_max_s=2.0, verbosity=0,
+        )
+
+        client.get("https://example.com/a")
+        client.get("https://example.com/b")
+
+        mock_sleep.assert_called_once()
+        actual_sleep = mock_sleep.call_args[0][0]
+        assert abs(actual_sleep - 2.0) < 0.01
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time")
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_no_delay_on_first_request(
+        self, mock_get, mock_time, mock_sleep
+    ):
+        mock_get.return_value = Mock(status_code=200)
+        mock_time.return_value = 100.0
+        client = HttpClient(delay_min_s=5.0, delay_max_s=5.0, verbosity=0)
+
+        client.get("https://example.com/first")
+
+        mock_sleep.assert_not_called()
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time")
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_no_delay_without_explicit_config(
+        self, mock_get, mock_time, mock_sleep
+    ):
+        mock_get.return_value = Mock(status_code=200)
+        mock_time.return_value = 100.0
+        client = HttpClient(verbosity=0)  # no delay, no robots
+
+        client.get("https://example.com/a")
+        client.get("https://example.com/b")
+
+        mock_sleep.assert_not_called()
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time")
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_no_sleep_when_enough_time_elapsed(
+        self, mock_get, mock_time, mock_sleep
+    ):
+        mock_get.return_value = Mock(status_code=200)
+        # First at t=100, second at t=200 — well past the 2s delay
+        mock_time.side_effect = [100.0, 200.0, 200.0]
+        client = HttpClient(delay_min_s=2.0, delay_max_s=2.0, verbosity=0)
+
+        client.get("https://example.com/a")
+        client.get("https://example.com/b")
+
+        mock_sleep.assert_not_called()
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time")
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_per_domain_independence(
+        self, mock_get, mock_time, mock_sleep
+    ):
+        mock_get.return_value = Mock(status_code=200)
+        mock_time.return_value = 100.0
+        client = HttpClient(delay_min_s=10.0, delay_max_s=10.0, verbosity=0)
+
+        client.get("https://a.example.com/page")
+        client.get("https://b.example.com/page")
+
+        mock_sleep.assert_not_called()
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time")
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_crawl_delay_overrides_lower_bound(
+        self, mock_get, mock_time, mock_sleep
+    ):
+        """Crawl-Delay of 10 should override delay_min_s=1, keeping max=5 raised to 10."""
+        mock_get.return_value = Mock(status_code=200)
+        mock_time.side_effect = [100.0, 100.0, 100.0]
+
+        client = HttpClient(
+            user_agent="TestBot/1.0",
+            respect_robots_txt=True,
+            delay_min_s=1.0,
+            delay_max_s=5.0,
+            verbosity=0,
+        )
+        mock_cache = Mock(spec=RobotsTxtCache)
+        mock_cache.can_fetch.return_value = True
+        mock_cache.crawl_delay.return_value = 10.0
+        client._robots_cache = mock_cache
+
+        client.get("https://example.com/page1")
+        client.get("https://example.com/page2")
+
+        mock_sleep.assert_called_once()
+        actual_sleep = mock_sleep.call_args[0][0]
+        # Both lower and upper are 10 (Crawl-Delay raised both)
+        assert abs(actual_sleep - 10.0) < 0.01
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time")
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_crawl_delay_below_range_has_no_effect(
+        self, mock_get, mock_time, mock_sleep
+    ):
+        """Crawl-Delay of 1 should NOT lower delay_min_s=5."""
+        mock_get.return_value = Mock(status_code=200)
+        mock_time.side_effect = [100.0, 100.0, 100.0]
+
+        client = HttpClient(
+            user_agent="TestBot/1.0",
+            respect_robots_txt=True,
+            delay_min_s=5.0,
+            delay_max_s=5.0,
+            verbosity=0,
+        )
+        mock_cache = Mock(spec=RobotsTxtCache)
+        mock_cache.can_fetch.return_value = True
+        mock_cache.crawl_delay.return_value = 1.0
+        client._robots_cache = mock_cache
+
+        client.get("https://example.com/page1")
+        client.get("https://example.com/page2")
+
+        mock_sleep.assert_called_once()
+        actual_sleep = mock_sleep.call_args[0][0]
+        assert abs(actual_sleep - 5.0) < 0.01
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.time.time")
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_crawl_delay_raises_lower_keeps_upper(
+        self, mock_get, mock_time, mock_sleep
+    ):
+        """Crawl-Delay of 3 with range 1-10 should give range 3-10."""
+        mock_get.return_value = Mock(status_code=200)
+        mock_time.side_effect = [100.0, 100.0, 100.0]
+
+        client = HttpClient(
+            user_agent="TestBot/1.0",
+            respect_robots_txt=True,
+            delay_min_s=1.0,
+            delay_max_s=10.0,
+            verbosity=0,
+        )
+        mock_cache = Mock(spec=RobotsTxtCache)
+        mock_cache.can_fetch.return_value = True
+        mock_cache.crawl_delay.return_value = 3.0
+        client._robots_cache = mock_cache
+
+        # Run many times to check the range empirically
+        sleeps = []
+        for i in range(50):
+            client._last_fetch_times["https://example.com"] = 100.0
+            mock_time.side_effect = [100.0]
+            mock_sleep.reset_mock()
+            client._apply_rate_limit("https://example.com/page")
+            if mock_sleep.called:
+                sleeps.append(mock_sleep.call_args[0][0])
+
+        assert all(s >= 2.99 for s in sleeps), f"Found sleep below 3: {min(sleeps)}"
+        assert all(s <= 10.01 for s in sleeps), f"Found sleep above 10: {max(sleeps)}"
+
+
+# ---------------------------------------------------------------------------
 # HttpClient tests — _handle_429 header parsing
 # ---------------------------------------------------------------------------
 

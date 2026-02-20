@@ -91,6 +91,10 @@ class HttpClient:
        otherwise falls back to a random delay between *rate_limit_min_s* and
        *rate_limit_max_s*.
 
+    When *delay_min_s* or *delay_max_s* is set the client inserts a random
+    per-domain delay between requests, independently of robots.txt.  If a
+    Crawl-Delay is also present it takes precedence.
+
     When *honor_retry_after* is ``True`` the client automatically retries
     requests that receive an HTTP 429 (Too Many Requests) response.  The wait
     time is determined from ``Retry-After`` (RFC 7231), ``RateLimit-Reset`` or
@@ -105,14 +109,22 @@ class HttpClient:
     Args:
         user_agent: Default User-Agent string.
         respect_robots_txt: Enable robots.txt checking and Crawl-Delay.
+        delay_min_s: Minimum inter-request delay in seconds.  Setting this
+            or *delay_max_s* enables per-domain delays.  Defaults to ``None``
+            (off).  If only *delay_max_s* is given, this defaults to ``0``.
+        delay_max_s: Maximum inter-request delay in seconds.  Defaults to
+            ``None`` (off).  If only *delay_min_s* is given, this defaults
+            to ``3 * delay_min_s``.
         honor_retry_after: Automatically retry on HTTP 429 responses.
         suppress_on_403: Automatically suppress domains that return 403.
         max_retries: Maximum number of 429 retries per request.
         default_retry_after_s: Fallback wait time when no retry header is
             present.
         max_retry_after_s: Cap on the wait time extracted from headers.
-        rate_limit_min_s: Minimum fallback delay in seconds.
-        rate_limit_max_s: Maximum fallback delay in seconds.
+        rate_limit_min_s: Minimum fallback delay in seconds (only used as
+            a fallback when *respect_robots_txt* is ``True`` and no
+            Crawl-Delay is declared).
+        rate_limit_max_s: Maximum fallback delay in seconds (same caveat).
         verbosity: Logging verbosity (0=silent, 1=warnings, 2=info, 3=debug).
     """
 
@@ -120,6 +132,8 @@ class HttpClient:
         self,
         user_agent: str = "PyPaperRetriever/1.0",
         respect_robots_txt: bool = False,
+        delay_min_s: Optional[float] = None,
+        delay_max_s: Optional[float] = None,
         honor_retry_after: bool = True,
         suppress_on_403: bool = True,
         max_retries: int = 3,
@@ -139,6 +153,19 @@ class HttpClient:
         self.rate_limit_min_s = rate_limit_min_s
         self.rate_limit_max_s = rate_limit_max_s
         self.verbosity = verbosity
+
+        # Resolve inter-request delay bounds.
+        if delay_min_s is not None or delay_max_s is not None:
+            if delay_min_s is None:
+                delay_min_s = 0.0
+            if delay_max_s is None:
+                delay_max_s = 3.0 * delay_min_s
+            self.delay_min_s: Optional[float] = delay_min_s
+            self.delay_max_s: Optional[float] = delay_max_s
+        else:
+            self.delay_min_s = None
+            self.delay_max_s = None
+
         self._last_fetch_times: Dict[str, float] = {}
         self._suppressed_domains: Dict[str, str] = {}
         self._robots_cache: Optional[RobotsTxtCache] = None
@@ -191,35 +218,65 @@ class HttpClient:
         """Return a copy of the currently suppressed domains and reasons."""
         return dict(self._suppressed_domains)
 
-    def _apply_rate_limit(self, url: str) -> None:
-        """Sleep to respect Crawl-Delay or fallback delay for this domain."""
-        if not self.respect_robots_txt:
-            return
+    @property
+    def _delay_enabled(self) -> bool:
+        """``True`` when an explicit inter-request delay has been configured."""
+        return self.delay_min_s is not None
 
+    def _apply_rate_limit(self, url: str) -> None:
+        """Sleep to honour Crawl-Delay, explicit delay, or robots fallback.
+
+        Priority:
+
+        1. If the user configured *delay_min_s* / *delay_max_s*, those form
+           the base range.
+        2. A robots.txt Crawl-Delay **overrides the lower bound** — if it is
+           larger than the current lower bound it raises both the floor and,
+           if necessary, the ceiling.
+        3. When *respect_robots_txt* is ``True`` but neither an explicit delay
+           nor a Crawl-Delay is present, the *rate_limit_min_s* /
+           *rate_limit_max_s* fallback is used.
+        """
         domain = self._domain_key(url)
         last_time = self._last_fetch_times.get(domain)
         if last_time is None:
             return
 
-        delay_seconds: Optional[float] = None
+        lower: Optional[float] = None
+        upper: Optional[float] = None
 
-        if self._robots_cache is not None:
-            delay_seconds = self._robots_cache.crawl_delay(url)
-            if delay_seconds is not None and self.verbosity >= 3:
-                print(
-                    f"  [HttpClient] Crawl-Delay for {domain}: "
-                    f"{delay_seconds}s"
-                )
+        # 1. Start with user-configured bounds
+        if self._delay_enabled:
+            lower = self.delay_min_s
+            upper = self.delay_max_s
 
-        if delay_seconds is None:
-            delay_seconds = random.uniform(
-                self.rate_limit_min_s, self.rate_limit_max_s
+        # 2. Crawl-Delay overrides the lower bound
+        if self.respect_robots_txt and self._robots_cache is not None:
+            crawl_delay = self._robots_cache.crawl_delay(url)
+            if crawl_delay is not None:
+                if lower is None:
+                    # No explicit delay — use Crawl-Delay as a fixed value
+                    lower = crawl_delay
+                    upper = crawl_delay
+                else:
+                    lower = max(lower, crawl_delay)
+                    upper = max(upper, lower)  # type: ignore[arg-type]
+
+        # 3. Fallback for robots.txt mode
+        if lower is None and self.respect_robots_txt:
+            lower = self.rate_limit_min_s
+            upper = self.rate_limit_max_s
+
+        if lower is None or upper is None:
+            return
+
+        delay_seconds = random.uniform(lower, upper)
+
+        if self.verbosity >= 3:
+            print(
+                f"  [HttpClient] Delay for {domain}: "
+                f"{delay_seconds:.2f}s (range {lower:.2f}–{upper:.2f}s)"
             )
-            if self.verbosity >= 3:
-                print(
-                    f"  [HttpClient] Fallback delay for {domain}: "
-                    f"{delay_seconds:.2f}s"
-                )
 
         elapsed = time.time() - last_time
         sleep_time = delay_seconds - elapsed
