@@ -1,20 +1,22 @@
 # HTTP Client & Polite Crawling
 
 PyPaperRetriever includes an `HttpClient` that wraps `requests.get()` with
-four features for polite and efficient crawling:
+five features for polite and efficient crawling:
 
 1. **robots.txt / Crawl-Delay** — check each domain's `robots.txt` before
    fetching and respect its `Crawl-Delay` directive.
 2. **Inter-request delay** — insert a random per-domain delay between
    consecutive requests, independently of robots.txt.
-3. **HTTP 429 retry** — automatically wait and retry when a server replies with
+3. **Exponential backoff** — automatically back off from domains that return
+   503, 504, or 429 without delay headers, and gradually recover on success.
+4. **HTTP 429 retry** — automatically wait and retry when a server replies with
    *429 Too Many Requests*.
-4. **403 domain suppression** — remember domains that return *403 Forbidden*
+5. **403 domain suppression** — remember domains that return *403 Forbidden*
    and short-circuit subsequent requests to the same domain, avoiding redundant
    network round-trips during bulk downloads.
 
 By default robots.txt support and inter-request delays are **off** (zero
-overhead) while 429 retry and 403 suppression are **on**.
+overhead) while backoff, 429 retry, and 403 suppression are **on**.
 
 ## Quick examples
 
@@ -115,6 +117,62 @@ is smaller than the configured minimum, it has no effect.
 
 Delays are tracked **per domain** — a slow delay on one site does not block
 requests to a different site.
+
+---
+
+## Exponential backoff
+
+`HttpClient` maintains per-domain exponential backoff state.  When a request
+to a domain receives one of the following responses, the backoff delay for
+that domain is increased:
+
+- **HTTP 503** (Service Unavailable)
+- **HTTP 504** (Gateway Timeout)
+- **HTTP 429** without any rate-limit headers (i.e. no `Retry-After`,
+  `RateLimit-Reset`, or `X-RateLimit-Reset`)
+
+The request is then retried (up to `max_retries` times) with exponentially
+increasing wait times.
+
+### How backoff grows
+
+On the first error the backoff delay is set to `backoff_base_s` (default
+1 s).  Each subsequent error **multiplies** the delay by
+`backoff_multiplier` (default 2.0), capped at `backoff_max_s` (default
+300 s).
+
+| Error | Backoff (defaults) |
+|-------|--------------------|
+| 1st   | 1 s                |
+| 2nd   | 2 s                |
+| 3rd   | 4 s                |
+| 4th   | 8 s                |
+| …     | doubles each time  |
+
+### Gradual recovery
+
+When a request to a domain **succeeds** (HTTP 2xx) and that domain has
+active backoff, the backoff delay is **linearly decreased** by
+`backoff_decay_s` (default 1 s).  When the delay reaches zero it is
+cleared entirely.  This allows a domain to gradually return to full speed
+after a transient outage.
+
+### Interaction with inter-request delays
+
+The backoff delay acts as a **lower bound** on the inter-request delay,
+using the same override logic as Crawl-Delay.  If the backoff is larger
+than the configured `delay_min_s`, it raises the floor (and ceiling if
+necessary).  If no explicit delay is configured, the backoff is applied as
+a fixed delay.
+
+### Inspecting backoff state
+
+```python
+client = HttpClient()
+# ... after some requests ...
+for domain, delay in client.backoff_delays.items():
+    print(f"{domain}: {delay:.1f}s")
+```
 
 ---
 
@@ -226,6 +284,10 @@ client = HttpClient(
     max_retries=5,
     default_retry_after_s=30.0,
     max_retry_after_s=120.0,
+    backoff_base_s=1.0,
+    backoff_multiplier=2.0,
+    backoff_max_s=120.0,
+    backoff_decay_s=0.5,
     rate_limit_min_s=1.0,
     rate_limit_max_s=3.0,
     verbosity=2,
@@ -250,9 +312,13 @@ else:
 | `delay_max_s` | `Optional[float]` | `None` | Maximum inter-request delay (seconds).  If only `delay_min_s` is given, defaults to `3 × delay_min_s`. |
 | `honor_retry_after` | `bool` | `True` | Automatically retry on HTTP 429 responses. |
 | `suppress_on_403` | `bool` | `True` | Suppress domains that return 403 Forbidden. |
-| `max_retries` | `int` | `3` | Maximum number of 429 retries per request. |
+| `max_retries` | `int` | `3` | Maximum number of retries per request (applies to 429, 503, and 504). |
 | `default_retry_after_s` | `float` | `60.0` | Fallback wait (seconds) when no rate-limit header is present. |
 | `max_retry_after_s` | `float` | `300.0` | Upper clamp on the server-requested wait time. |
+| `backoff_base_s` | `float` | `1.0` | Initial backoff delay (seconds) on first error. |
+| `backoff_multiplier` | `float` | `2.0` | Multiplier applied to the backoff delay on each consecutive error. |
+| `backoff_max_s` | `float` | `300.0` | Maximum backoff delay (seconds). |
+| `backoff_decay_s` | `float` | `1.0` | Amount subtracted from the backoff delay on each successful (2xx) response. |
 | `rate_limit_min_s` | `float` | `1.0` | Minimum fallback delay (seconds) when no Crawl-Delay is declared. |
 | `rate_limit_max_s` | `float` | `3.0` | Maximum fallback delay (seconds). |
 | `verbosity` | `int` | `1` | Logging verbosity: 0 = silent, 1 = warnings, 2 = info, 3 = debug. |
@@ -304,4 +370,5 @@ on by default in every `HttpClient` instance).
         - __init__
         - get
         - suppressed_domains
+        - backoff_delays
       inherited_members: false

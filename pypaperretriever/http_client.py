@@ -1,11 +1,11 @@
-"""HTTP client with robots.txt, Crawl-Delay, 429 retry, and 403 suppression.
+"""HTTP client with robots.txt, Crawl-Delay, backoff, 429 retry, and 403 suppression.
 
 This module provides an :class:`HttpClient` that can optionally fetch and
 respect robots.txt directives, including Crawl-Delay, for every domain it
-contacts.  It can also automatically retry on HTTP 429 (Too Many Requests)
-responses and suppress domains that return HTTP 403 (Forbidden).  When all
-features are disabled the client is a thin pass-through to
-:func:`requests.get`.
+contacts.  It can also automatically retry on HTTP 429 (Too Many Requests),
+503, and 504 responses with exponential backoff, and suppress domains that
+return HTTP 403 (Forbidden).  When all features are disabled the client is
+a thin pass-through to :func:`requests.get`.
 """
 
 from __future__ import annotations
@@ -81,7 +81,7 @@ class RobotsTxtCache:
 
 
 class HttpClient:
-    """HTTP client with robots.txt, 429 retry, and 403 suppression support.
+    """HTTP client with robots.txt, backoff, 429 retry, and 403 suppression.
 
     When *respect_robots_txt* is ``True`` the client:
 
@@ -95,11 +95,18 @@ class HttpClient:
     per-domain delay between requests, independently of robots.txt.  If a
     Crawl-Delay is also present it takes precedence.
 
+    The client maintains per-domain exponential backoff state.  When a request
+    receives HTTP 503, 504, or 429 without delay headers, the backoff delay
+    for that domain is increased.  On a successful (2xx) response the backoff
+    delay is decreased linearly.  The backoff delay acts as a lower bound on
+    the inter-request delay.
+
     When *honor_retry_after* is ``True`` the client automatically retries
     requests that receive an HTTP 429 (Too Many Requests) response.  The wait
     time is determined from ``Retry-After`` (RFC 7231), ``RateLimit-Reset`` or
     ``X-RateLimit-Reset`` (IETF draft) headers.  If none are present a
-    *default_retry_after_s* fallback is used.
+    *default_retry_after_s* fallback is used.  Requests that receive HTTP 503
+    or 504 are also retried with exponential backoff.
 
     When *suppress_on_403* is ``True`` (the default) the client records any
     domain that returns HTTP 403 (Forbidden).  Subsequent requests to the same
@@ -117,10 +124,17 @@ class HttpClient:
             to ``3 * delay_min_s``.
         honor_retry_after: Automatically retry on HTTP 429 responses.
         suppress_on_403: Automatically suppress domains that return 403.
-        max_retries: Maximum number of 429 retries per request.
+        max_retries: Maximum number of retries per request (applies to 429,
+            503, and 504 responses).
         default_retry_after_s: Fallback wait time when no retry header is
             present.
         max_retry_after_s: Cap on the wait time extracted from headers.
+        backoff_base_s: Initial backoff delay in seconds.
+        backoff_multiplier: Exponential multiplier applied to the backoff
+            delay on each consecutive error.
+        backoff_max_s: Maximum backoff delay in seconds.
+        backoff_decay_s: Amount subtracted from the backoff delay on each
+            successful (2xx) response.
         rate_limit_min_s: Minimum fallback delay in seconds (only used as
             a fallback when *respect_robots_txt* is ``True`` and no
             Crawl-Delay is declared).
@@ -139,6 +153,10 @@ class HttpClient:
         max_retries: int = 3,
         default_retry_after_s: float = 60.0,
         max_retry_after_s: float = 300.0,
+        backoff_base_s: float = 1.0,
+        backoff_multiplier: float = 2.0,
+        backoff_max_s: float = 300.0,
+        backoff_decay_s: float = 1.0,
         rate_limit_min_s: float = 1.0,
         rate_limit_max_s: float = 3.0,
         verbosity: int = 1,
@@ -150,6 +168,10 @@ class HttpClient:
         self.max_retries = max_retries
         self.default_retry_after_s = default_retry_after_s
         self.max_retry_after_s = max_retry_after_s
+        self.backoff_base_s = backoff_base_s
+        self.backoff_multiplier = backoff_multiplier
+        self.backoff_max_s = backoff_max_s
+        self.backoff_decay_s = backoff_decay_s
         self.rate_limit_min_s = rate_limit_min_s
         self.rate_limit_max_s = rate_limit_max_s
         self.verbosity = verbosity
@@ -168,6 +190,7 @@ class HttpClient:
 
         self._last_fetch_times: Dict[str, float] = {}
         self._suppressed_domains: Dict[str, str] = {}
+        self._backoff_delays: Dict[str, float] = {}
         self._robots_cache: Optional[RobotsTxtCache] = None
         if self.respect_robots_txt:
             self._robots_cache = RobotsTxtCache(user_agent=self.user_agent)
@@ -223,8 +246,56 @@ class HttpClient:
         """``True`` when an explicit inter-request delay has been configured."""
         return self.delay_min_s is not None
 
+    def _increase_backoff(self, domain: str) -> float:
+        """Increase the exponential backoff delay for *domain*.
+
+        On first call for a domain the delay is set to *backoff_base_s*.
+        On subsequent calls it is multiplied by *backoff_multiplier*, capped
+        at *backoff_max_s*.
+
+        Returns:
+            The new backoff delay in seconds.
+        """
+        current = self._backoff_delays.get(domain)
+        if current is None:
+            new_delay = self.backoff_base_s
+        else:
+            new_delay = current * self.backoff_multiplier
+        new_delay = min(new_delay, self.backoff_max_s)
+        self._backoff_delays[domain] = new_delay
+        if self.verbosity >= 2:
+            print(f"  [HttpClient] Backoff for {domain}: {new_delay:.1f}s")
+        return new_delay
+
+    def _decrease_backoff(self, domain: str) -> None:
+        """Linearly decrease the backoff delay for *domain* on success.
+
+        Subtracts *backoff_decay_s* from the current backoff.  When the
+        result reaches zero or below the backoff is cleared entirely.
+        """
+        current = self._backoff_delays.get(domain)
+        if current is None:
+            return
+        new_delay = current - self.backoff_decay_s
+        if new_delay <= 0:
+            del self._backoff_delays[domain]
+            if self.verbosity >= 3:
+                print(f"  [HttpClient] Backoff cleared for {domain}")
+        else:
+            self._backoff_delays[domain] = new_delay
+            if self.verbosity >= 3:
+                print(
+                    f"  [HttpClient] Backoff decreased for {domain}: "
+                    f"{new_delay:.1f}s"
+                )
+
+    @property
+    def backoff_delays(self) -> Dict[str, float]:
+        """Return a copy of the current per-domain backoff delays."""
+        return dict(self._backoff_delays)
+
     def _apply_rate_limit(self, url: str) -> None:
-        """Sleep to honour Crawl-Delay, explicit delay, or robots fallback.
+        """Sleep to honour Crawl-Delay, backoff, explicit delay, or fallback.
 
         Priority:
 
@@ -233,7 +304,9 @@ class HttpClient:
         2. A robots.txt Crawl-Delay **overrides the lower bound** — if it is
            larger than the current lower bound it raises both the floor and,
            if necessary, the ceiling.
-        3. When *respect_robots_txt* is ``True`` but neither an explicit delay
+        3. An active exponential backoff **overrides the lower bound** using
+           the same logic as Crawl-Delay.
+        4. When *respect_robots_txt* is ``True`` but neither an explicit delay
            nor a Crawl-Delay is present, the *rate_limit_min_s* /
            *rate_limit_max_s* fallback is used.
         """
@@ -262,7 +335,17 @@ class HttpClient:
                     lower = max(lower, crawl_delay)
                     upper = max(upper, lower)  # type: ignore[arg-type]
 
-        # 3. Fallback for robots.txt mode
+        # 3. Backoff overrides the lower bound
+        backoff = self._backoff_delays.get(domain)
+        if backoff is not None:
+            if lower is None:
+                lower = backoff
+                upper = backoff
+            else:
+                lower = max(lower, backoff)
+                upper = max(upper, lower)  # type: ignore[arg-type]
+
+        # 4. Fallback for robots.txt mode
         if lower is None and self.respect_robots_txt:
             lower = self.rate_limit_min_s
             upper = self.rate_limit_max_s
@@ -285,7 +368,9 @@ class HttpClient:
                 print(f"  [HttpClient] Sleeping {sleep_time:.2f}s for {domain}")
             time.sleep(sleep_time)
 
-    def _handle_429(self, response: requests.Response, url: str) -> float:
+    def _handle_429(
+        self, response: requests.Response, url: str
+    ) -> tuple[float, bool]:
         """Parse a 429 response to determine how long to wait before retrying.
 
         The method checks, in order:
@@ -302,10 +387,13 @@ class HttpClient:
             url: The URL that was requested (for logging).
 
         Returns:
-            Wait time in seconds.
+            A ``(wait_seconds, header_found)`` tuple.  *header_found* is
+            ``True`` when a rate-limit header was present, ``False`` when the
+            default fallback was used.
         """
         wait_seconds: Optional[float] = None
         header_used: Optional[str] = None
+        header_found = False
 
         # 1. Retry-After (RFC 7231)
         retry_after = response.headers.get("Retry-After")
@@ -313,6 +401,7 @@ class HttpClient:
             try:
                 wait_seconds = float(retry_after)
                 header_used = "Retry-After"
+                header_found = True
             except ValueError:
                 try:
                     retry_time = parsedate_to_datetime(retry_after)
@@ -321,6 +410,7 @@ class HttpClient:
                     ).total_seconds()
                     wait_seconds = max(0.0, wait_seconds)
                     header_used = "Retry-After"
+                    header_found = True
                 except (ValueError, TypeError):
                     pass
 
@@ -342,6 +432,7 @@ class HttpClient:
                         if "RateLimit-Reset" in response.headers
                         else "X-RateLimit-Reset"
                     )
+                    header_found = True
                 except (ValueError, TypeError):
                     pass
 
@@ -368,7 +459,7 @@ class HttpClient:
                 f"before retry (from {header_used})"
             )
 
-        return wait_seconds
+        return wait_seconds, header_found
 
     #: Domains that act as redirectors and should never be suppressed, because
     #: a 403 from these domains originates at the *destination* site.
@@ -383,7 +474,7 @@ class HttpClient:
         return netloc in self.SUPPRESSION_EXEMPT_DOMAINS
 
     def get(self, url: str, **kwargs: Any) -> Optional[requests.Response]:
-        """Make a GET request with optional robots.txt, 429, and 403 handling.
+        """Make a GET request with optional robots.txt, backoff, retry, and 403.
 
         Args:
             url: The URL to fetch.
@@ -419,17 +510,33 @@ class HttpClient:
 
         response = requests.get(url, **kwargs)
 
-        # 3. 429 retry
-        if self.honor_retry_after and response.status_code == 429:
-            for attempt in range(self.max_retries):
-                wait = self._handle_429(response, url)
+        # 3. Retry loop for 429, 503, 504
+        for _attempt in range(self.max_retries):
+            if response.status_code == 429 and self.honor_retry_after:
+                wait, header_found = self._handle_429(response, url)
+                if not header_found:
+                    backoff_wait = self._increase_backoff(domain)
+                    wait = max(wait, backoff_wait)
                 time.sleep(wait)
-                self._last_fetch_times[domain] = time.time()
-                response = requests.get(url, **kwargs)
-                if response.status_code != 429:
-                    break
+            elif response.status_code in (503, 504):
+                wait = self._increase_backoff(domain)
+                if self.verbosity >= 1:
+                    print(
+                        f"  [HttpClient] HTTP {response.status_code} — "
+                        f"backing off {wait:.0f}s before retry"
+                    )
+                time.sleep(wait)
+            else:
+                break
 
-        # 4. 403 suppression registration
+            self._last_fetch_times[domain] = time.time()
+            response = requests.get(url, **kwargs)
+
+        # 4. Decrease backoff on success
+        if 200 <= response.status_code < 300:
+            self._decrease_backoff(domain)
+
+        # 5. 403 suppression registration
         if (
             self.suppress_on_403
             and response.status_code == 403
