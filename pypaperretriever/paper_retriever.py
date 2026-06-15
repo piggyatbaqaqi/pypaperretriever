@@ -36,6 +36,9 @@ class PaperRetriever:
         override_previous_attempt (bool, optional): Overwrite existing downloads.
         respect_robots_txt (bool, optional): Respect robots.txt directives and
             Crawl-Delay for all HTTP requests.
+        suppress_on_403 (bool, optional): Suppress domains that return 403
+            Forbidden, returning a cached 403 for subsequent requests to the
+            same domain.
 
     Attributes:
         doi (str): DOI encoded for safe file paths.
@@ -47,7 +50,7 @@ class PaperRetriever:
         on_scihub (bool): ``True`` if the PDF was found on Sci-Hub.
     """
 
-    def __init__(self, email, doi=None, pmid=None, allow_scihub=False, download_directory='PDFs', filename=None, override_previous_attempt=False, respect_robots_txt=False):
+    def __init__(self, email, doi=None, pmid=None, allow_scihub=False, download_directory='PDFs', filename=None, override_previous_attempt=False, respect_robots_txt=False, suppress_on_403=True):
         self.email = email
         if not doi and not pmid:
             raise ValueError("Either a DOI or PMID must be provided")
@@ -65,6 +68,7 @@ class PaperRetriever:
         self.download_directory = download_directory
         self.filename = filename
         self.respect_robots_txt = respect_robots_txt
+        self.suppress_on_403 = suppress_on_403
         self.user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15",
@@ -74,6 +78,7 @@ class PaperRetriever:
         self._http_client = HttpClient(
             user_agent=random.choice(self.user_agents),
             respect_robots_txt=respect_robots_txt,
+            suppress_on_403=suppress_on_403,
         )
  
     def download(self) -> Self:
@@ -533,9 +538,11 @@ def main() -> None:
                     help='Allow downloading from Sci-Hub if available (true/false).')
     parser.add_argument('--respect-robots-txt', action='store_true', default=False,
                     help='Respect robots.txt directives and Crawl-Delay for all domains.')
+    parser.add_argument('--no-suppress-403', action='store_true', default=False,
+                    help='Disable automatic suppression of domains that return 403 Forbidden.')
 
     args = parser.parse_args()
-    args.allow_scihub = args.allow_scihub.lower() == 'true' 
+    args.allow_scihub = args.allow_scihub.lower() == 'true'
 
     retriever = PaperRetriever(
         email=args.email,
@@ -546,6 +553,7 @@ def main() -> None:
         override_previous_attempt=args.override,
         allow_scihub=args.allow_scihub,
         respect_robots_txt=args.respect_robots_txt,
+        suppress_on_403=not args.no_suppress_403,
     )
 
     retriever.download()
