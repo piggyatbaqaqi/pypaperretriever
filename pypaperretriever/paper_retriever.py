@@ -16,6 +16,7 @@ import requests
 from bs4 import BeautifulSoup
 from typing import Self
 
+from .http_client import HttpClient
 from .utils import decode_doi, doi_to_pmid, encode_doi, entrez_efetch, pmid_to_doi
 
 
@@ -33,6 +34,11 @@ class PaperRetriever:
         download_directory (str, optional): Directory where PDFs are stored.
         filename (str, optional): Custom filename for the downloaded PDF.
         override_previous_attempt (bool, optional): Overwrite existing downloads.
+        respect_robots_txt (bool, optional): Respect robots.txt directives and
+            Crawl-Delay for all HTTP requests.
+        suppress_on_403 (bool, optional): Suppress domains that return 403
+            Forbidden, returning a cached 403 for subsequent requests to the
+            same domain.
 
     Attributes:
         doi (str): DOI encoded for safe file paths.
@@ -44,7 +50,7 @@ class PaperRetriever:
         on_scihub (bool): ``True`` if the PDF was found on Sci-Hub.
     """
 
-    def __init__(self, email, doi=None, pmid=None, allow_scihub=False, download_directory='PDFs', filename=None, override_previous_attempt=False):
+    def __init__(self, email, doi=None, pmid=None, allow_scihub=False, download_directory='PDFs', filename=None, override_previous_attempt=False, respect_robots_txt=False, suppress_on_403=True, polite_mode=True):
         self.email = email
         if not doi and not pmid:
             raise ValueError("Either a DOI or PMID must be provided")
@@ -61,12 +67,21 @@ class PaperRetriever:
         self.override_previous_attempt = override_previous_attempt
         self.download_directory = download_directory
         self.filename = filename
+        self.respect_robots_txt = respect_robots_txt
+        self.suppress_on_403 = suppress_on_403
+        self.polite_mode = polite_mode
         self.user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:88.0) Gecko/20100101 Firefox/88.0",
             "Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/88.0.4324.182 Mobile Safari/537.36",
         ]
+        self._http_client = HttpClient(
+            user_agent=random.choice(self.user_agents),
+            respect_robots_txt=respect_robots_txt,
+            suppress_on_403=suppress_on_403,
+            polite_mode=polite_mode,
+        )
  
     def download(self) -> Self:
         """Find and download the paper.
@@ -119,8 +134,10 @@ class PaperRetriever:
         """
 
         url = f"https://api.unpaywall.org/v2/{decode_doi(self.doi)}?email={self.email}"
-        response = requests.get(url)
-        
+        response = self._http_client.get(url)
+        if response is None:
+            return self
+
         if response.status_code == 200:
             data = response.json()
             pdf_urls = [None, None, None, None]
@@ -154,7 +171,7 @@ class PaperRetriever:
 
         """
         pmc_id = None
-        id = self.pmid if self.pmid else doi_to_pmid(decode_doi(self.doi), self.email)
+        id = self.pmid if self.pmid else doi_to_pmid(decode_doi(self.doi), self.email, http_client=self._http_client)
         records = entrez_efetch(self.email, id)
         try:
             id_list = records['PubmedArticle'][0]['PubmedData']['ArticleIdList']
@@ -169,7 +186,9 @@ class PaperRetriever:
 
             article_link = f'https://pmc.ncbi.nlm.nih.gov/articles/{pmc_id}/'
 
-            response = requests.get(article_link, headers={"User-Agent": random.choice(self.user_agents)})
+            response = self._http_client.get(article_link, headers={"User-Agent": random.choice(self.user_agents)})
+            if response is None:
+                return self
 
             if response.status_code == 200:
                 soup = BeautifulSoup(response.content, 'html.parser')
@@ -200,7 +219,9 @@ class PaperRetriever:
         pdf_urls = []
         
         try:
-            response = requests.get(full_url)
+            response = self._http_client.get(full_url)
+            if response is None:
+                return self
             if response.status_code == 200:
                 data = response.json()
                 primary_url = data.get('message', {}).get('URL', None)
@@ -211,12 +232,14 @@ class PaperRetriever:
             
             for url in urls:
                 try:
-                    response = requests.get(url, headers={
+                    response = self._http_client.get(url, headers={
                         "User-Agent":  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
                                     "AppleWebKit/537.36 (KHTML, like Gecko) " +
                                     "Chrome/58.0.3029.110 Safari/537.3"
                     }, timeout=10)  # Added timeout for better error handling
-                    
+                    if response is None:
+                        continue
+
                     if response.status_code == 200:
                         final_url = response.url  # The final resolved URL after redirects
                         soup = BeautifulSoup(response.content, 'html.parser')
@@ -293,7 +316,8 @@ class PaperRetriever:
         urls = [f"{mirror}/{decode_doi(self.doi)}" for mirror in mirror_list]
 
         for i, url in enumerate(urls):
-            time.sleep(random.randint(1, 3)) # Delay between requests, avoids being blocked
+            if not self.respect_robots_txt:
+                time.sleep(random.randint(1, 3)) # Delay between requests, avoids being blocked
             headers = {
                 "User-Agent": random.choice(self.user_agents),
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
@@ -301,7 +325,9 @@ class PaperRetriever:
                 "Referer": "https://www.google.com/",
             }
             try:
-                r = requests.get(url, headers=headers)
+                r = self._http_client.get(url, headers=headers)
+                if r is None:
+                    continue
                 if r.status_code == 200:
                     if len(r.text) < 1:
                         print("""We probably got blocked by Sci-Hub for too many requests. 
@@ -345,7 +371,9 @@ class PaperRetriever:
 
         for pdf_url in self.pdf_urls:
             try:
-                response = requests.get(pdf_url, headers=headers, stream=True)
+                response = self._http_client.get(pdf_url, headers=headers, stream=True)
+                if response is None:
+                    continue
                 if response.status_code == 200:
                     with open(pdf_path, 'wb') as f:
                         for chunk in response.iter_content(chunk_size=8192):
@@ -510,9 +538,15 @@ def main() -> None:
     parser.add_argument('--override', action='store_true', help='Override previous download attempts.')
     parser.add_argument('--allow-scihub', choices=['true', 'false'], default='false',
                     help='Allow downloading from Sci-Hub if available (true/false).')
+    parser.add_argument('--respect-robots-txt', action='store_true', default=False,
+                    help='Respect robots.txt directives and Crawl-Delay for all domains.')
+    parser.add_argument('--no-suppress-403', action='store_true', default=False,
+                    help='Disable automatic suppression of domains that return 403 Forbidden.')
+    parser.add_argument('--no-polite-mode', action='store_true', default=False,
+                    help='Disable polite mode (robots.txt compliance and rate limits).')
 
     args = parser.parse_args()
-    args.allow_scihub = args.allow_scihub.lower() == 'true' 
+    args.allow_scihub = args.allow_scihub.lower() == 'true'
 
     retriever = PaperRetriever(
         email=args.email,
@@ -522,7 +556,14 @@ def main() -> None:
         filename=args.filename,
         override_previous_attempt=args.override,
         allow_scihub=args.allow_scihub,
+        respect_robots_txt=args.respect_robots_txt,
+        suppress_on_403=not args.no_suppress_403,
+        polite_mode=not args.no_polite_mode,
     )
 
     retriever.download()
+
+
+if __name__ == '__main__':
+    main()
 

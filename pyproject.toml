@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pypaperretriever"
+version = "1.0.1"
+description = "A tool to retrieve and process academic papers"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [
+  { name="Joseph Turner", email="josephisaacturner@gmail.com" }
+]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.8",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Information Analysis",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+keywords = ["pubmed", "doi", "pmid", "academic-papers", "downloader", "image-extraction", "citation-network"]
+dependencies = [
+  "pandas>=2.2.3,<3.0",
+  "numpy>=1.26,<3.0",
+  "tqdm>=4.64.1,<5.0",
+  "biopython>=1.83,<2.0",
+  "lxml>=5.2.0",
+  "requests>=2.31.0,<3.0",
+  "PyMuPDF>=1.24.1,<2.0",
+  "pdf2image>=1.17.0,<2.0",
+  "beautifulsoup4>=4.12.3,<5.0",
+  "opencv-python>=4.11.0.86,<5.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/josephisaacturner/pypaperretriever"
+Documentation = "https://josephiturner.com/pypaperretriever/"
+Repository = "https://github.com/josephisaacturner/pypaperretriever"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3.4,<9.0"]
+
+[project.scripts]
+pypaperretriever = "pypaperretriever.paper_retriever:main"
+
+[tool.setuptools.packages.find]
+where   = ["."]
+include = ["pypaperretriever*"]
+exclude = ["tests*", "docs*", "dist*"]

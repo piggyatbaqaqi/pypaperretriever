@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, Optional
 from urllib.parse import quote, unquote
 
 from Bio import Entrez
 import requests
+
+if TYPE_CHECKING:
+    from .http_client import HttpClient
 
 
 def entrez_efetch(email: str, id: str) -> Any:
@@ -49,7 +52,7 @@ def pmid_to_doi(pmid: str, email: str) -> str | None:
     return None
 
 
-def doi_to_pmid(doi: str, email: str) -> str | None:
+def doi_to_pmid(doi: str, email: str, http_client: Optional[HttpClient] = None) -> str | None:
     """Convert a DOI to a PMID.
 
     The function first queries the Entrez API. If that fails, the PMC ID
@@ -58,6 +61,7 @@ def doi_to_pmid(doi: str, email: str) -> str | None:
     Args:
         doi (str): Digital Object Identifier to convert.
         email (str): Email address required by the Entrez API.
+        http_client (HttpClient | None): Optional HTTP client for rate-limited requests.
 
     Returns:
         str | None: PMID if found, otherwise ``None``.
@@ -76,7 +80,12 @@ def doi_to_pmid(doi: str, email: str) -> str | None:
     try:
         url_base = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?"
         url = f"{url_base}ids={doi}&format=json"
-        response = requests.get(url)
+        if http_client is not None:
+            response = http_client.get(url)
+            if response is None:
+                return None
+        else:
+            response = requests.get(url)
         if response.status_code == 200:
             data = response.json()
             pmid = data.get("records", [{}])[0].get("pmid", None)

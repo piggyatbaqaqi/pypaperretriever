@@ -5,7 +5,7 @@ This guide highlights common workflows of **PyPaperRetriever**.
 ## Installation
 
 ```bash
-pip install git+https://github.com/josephisaacturner/pypaperretriever.git
+pip install pypaperretriever
 ```
 
 ## Download a paper

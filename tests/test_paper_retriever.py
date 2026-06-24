@@ -69,7 +69,7 @@ def mock_entrez_efetch_pmid(*args, **kwargs):
     data = BytesIO(data.encode())
     return Entrez.read(data)
 
-@patch('pypaperretriever.paper_retriever.requests.get', side_effect=mock_requests_get)
+@patch('pypaperretriever.http_client.requests.get', side_effect=mock_requests_get)
 @patch('pypaperretriever.utils.entrez_efetch', side_effect=mock_entrez_efetch_doi)
 def test_fetch_paper_with_doi(mock_efetch, mock_get, tmp_path):
     """
@@ -112,7 +112,7 @@ def test_fetch_paper_with_doi(mock_efetch, mock_get, tmp_path):
         assert json_data['pdf_filepath'].endswith(str(expected_pdf_path).replace(str(tmp_path), ""))
         assert json_data['open_access'] is True
 
-@patch('pypaperretriever.paper_retriever.requests.get', side_effect=mock_requests_get)
+@patch('pypaperretriever.http_client.requests.get', side_effect=mock_requests_get)
 @patch('pypaperretriever.utils.entrez_efetch', side_effect=mock_entrez_efetch_pmid)
 def test_fetch_paper_with_pmid(mock_efetch, mock_get, tmp_path):
     """
@@ -153,3 +153,14 @@ def test_fetch_paper_with_pmid(mock_efetch, mock_get, tmp_path):
         assert json_data['download_success'] is True
         assert json_data['pdf_filepath'].endswith(str(expected_pdf_path).replace(str(tmp_path), ""))
         assert json_data['open_access'] is True
+
+
+def test_paper_retriever_polite_mode_init():
+    """Test that PaperRetriever correctly passes polite_mode to HttpClient."""
+    retriever_polite = PaperRetriever(email=TEST_EMAIL, doi=TEST_DOI, polite_mode=True)
+    assert retriever_polite.polite_mode is True
+    assert retriever_polite._http_client.polite_mode is True
+
+    retriever_impolite = PaperRetriever(email=TEST_EMAIL, doi=TEST_DOI, polite_mode=False)
+    assert retriever_impolite.polite_mode is False
+    assert retriever_impolite._http_client.polite_mode is False
