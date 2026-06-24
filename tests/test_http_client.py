@@ -157,6 +157,66 @@ class TestHttpClientPassthrough:
 
 
 # ---------------------------------------------------------------------------
+# HttpClient tests — polite_mode=False
+# ---------------------------------------------------------------------------
+
+class TestHttpClientPoliteMode:
+
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_polite_mode_false_ignores_robots_txt(self, mock_get):
+        mock_get.return_value = Mock(status_code=200)
+        client = HttpClient(respect_robots_txt=True, polite_mode=False)
+        # Mock robots cache to return false for can_fetch
+        mock_cache = Mock(spec=RobotsTxtCache)
+        mock_cache.can_fetch.return_value = False
+        client._robots_cache = mock_cache
+
+        resp = client.get("https://example.com/blocked")
+        assert resp is not None
+        assert resp.status_code == 200
+        mock_get.assert_called_once()
+
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_polite_mode_false_ignores_403_suppression(self, mock_get):
+        resp_403 = Mock(status_code=403)
+        resp_403.url = "https://example.com/forbidden"
+        mock_get.return_value = resp_403
+
+        client = HttpClient(suppress_on_403=True, polite_mode=False)
+        
+        # First request
+        resp1 = client.get("https://example.com/forbidden")
+        assert resp1.status_code == 403
+        
+        # Second request to the same domain should hit network again, not suppressed
+        resp2 = client.get("https://example.com/other")
+        assert resp2.status_code == 403
+        assert mock_get.call_count == 2
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_polite_mode_false_does_not_sleep_for_delays(self, mock_get, mock_sleep):
+        mock_get.return_value = Mock(status_code=200)
+        client = HttpClient(delay_min_s=5.0, delay_max_s=5.0, polite_mode=False)
+        
+        client.get("https://example.com/a")
+        client.get("https://example.com/b")
+        mock_sleep.assert_not_called()
+
+    @patch("pypaperretriever.http_client.time.sleep")
+    @patch("pypaperretriever.http_client.requests.get")
+    def test_polite_mode_false_does_not_retry_on_429(self, mock_get, mock_sleep):
+        resp_429 = Mock(status_code=429)
+        mock_get.return_value = resp_429
+        client = HttpClient(honor_retry_after=True, polite_mode=False)
+        
+        resp = client.get("https://example.com/page")
+        assert resp.status_code == 429
+        mock_get.assert_called_once()
+        mock_sleep.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # HttpClient tests — respect_robots_txt=True
 # ---------------------------------------------------------------------------
 

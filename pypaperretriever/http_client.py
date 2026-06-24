@@ -160,6 +160,7 @@ class HttpClient:
         rate_limit_min_s: float = 1.0,
         rate_limit_max_s: float = 3.0,
         verbosity: int = 1,
+        polite_mode: bool = True,
     ) -> None:
         self.user_agent = user_agent
         self.respect_robots_txt = respect_robots_txt
@@ -175,6 +176,7 @@ class HttpClient:
         self.rate_limit_min_s = rate_limit_min_s
         self.rate_limit_max_s = rate_limit_max_s
         self.verbosity = verbosity
+        self.polite_mode = polite_mode
 
         # Resolve inter-request delay bounds.
         if delay_min_s is not None or delay_max_s is not None:
@@ -485,6 +487,13 @@ class HttpClient:
             A :class:`requests.Response`, or ``None`` if the URL is disallowed
             by robots.txt.
         """
+        if not self.polite_mode:
+            headers = kwargs.get("headers", {})
+            if "User-Agent" not in headers:
+                headers["User-Agent"] = self.user_agent
+                kwargs["headers"] = headers
+            return requests.get(url, **kwargs)
+
         # 1. Suppression check (before any network I/O)
         if self.suppress_on_403:
             suppressed = self._check_suppression(url)

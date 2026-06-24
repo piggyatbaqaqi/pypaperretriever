@@ -15,8 +15,9 @@ five features for polite and efficient crawling:
    and short-circuit subsequent requests to the same domain, avoiding redundant
    network round-trips during bulk downloads.
 
-By default robots.txt support and inter-request delays are **off** (zero
-overhead) while backoff, 429 retry, and 403 suppression are **on**.
+By default, the `polite_mode` flag is enabled (`True`), meaning backoff, 429 retry, and 403 suppression are active. Individual features like robots.txt support and inter-request delays are **off** (zero overhead) by default unless explicitly enabled.
+
+Setting `polite_mode=False` disables all polite crawling features completely (including robots.txt compliance, backoff, retry, and suppression) to prioritize raw access.
 
 ## Quick examples
 
@@ -29,7 +30,7 @@ retriever = PaperRetriever(
     email="you@example.com",
     doi="10.7759/cureus.76081",
     download_directory="PDFs",
-    respect_robots_txt=True,   # enable robots.txt + Crawl-Delay
+    polite_mode=False,   # disable all polite crawling features for raw access
 )
 retriever.download()
 ```
@@ -43,7 +44,7 @@ pypaperretriever \
     --email you@example.com \
     --doi 10.7759/cureus.76081 \
     --dwn-dir PDFs \
-    --respect-robots-txt
+    --no-polite-mode
 ```
 
 ---
@@ -306,6 +307,7 @@ else:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
+| `polite_mode` | `bool` | `True` | Wrap all polite crawling features. If `False`, completely bypass robots.txt checks, rate limits, delays, and retry/suppression logic to prioritize raw access. |
 | `user_agent` | `str` | `"PyPaperRetriever/1.0"` | Default `User-Agent` header and the name used for robots.txt look-ups. |
 | `respect_robots_txt` | `bool` | `False` | Enable robots.txt checking and Crawl-Delay enforcement. |
 | `delay_min_s` | `Optional[float]` | `None` | Minimum inter-request delay (seconds).  Setting this or `delay_max_s` enables per-domain delays.  If only `delay_max_s` is given, defaults to `0`. |
@@ -344,13 +346,12 @@ else:
 
 | Class | How it's configured |
 |-------|---------------------|
-| `PaperRetriever` | Accepts `respect_robots_txt` and `suppress_on_403` constructor parameters; creates its own `HttpClient`. |
+| `PaperRetriever` | Accepts `respect_robots_txt`, `suppress_on_403`, and `polite_mode` constructor parameters; creates its own `HttpClient`. |
 | `PubMedSearcher` | Accepts `respect_robots_txt`; creates its own `HttpClient` and passes the flag through to `PaperRetriever` and `ReferenceRetriever`. |
 | `ReferenceRetriever` | Accepts an optional `http_client` parameter. |
 | `utils.doi_to_pmid()` | Accepts an optional `http_client` parameter for its PMC ID Converter fallback request. |
 
-All classes benefit from 429 retry and 403 suppression automatically (both are
-on by default in every `HttpClient` instance).
+All classes benefit from 429 retry and 403 suppression automatically when `polite_mode` is `True` (enabled by default).
 
 ---
 

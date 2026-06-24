@@ -50,7 +50,7 @@ class PaperRetriever:
         on_scihub (bool): ``True`` if the PDF was found on Sci-Hub.
     """
 
-    def __init__(self, email, doi=None, pmid=None, allow_scihub=False, download_directory='PDFs', filename=None, override_previous_attempt=False, respect_robots_txt=False, suppress_on_403=True):
+    def __init__(self, email, doi=None, pmid=None, allow_scihub=False, download_directory='PDFs', filename=None, override_previous_attempt=False, respect_robots_txt=False, suppress_on_403=True, polite_mode=True):
         self.email = email
         if not doi and not pmid:
             raise ValueError("Either a DOI or PMID must be provided")
@@ -69,6 +69,7 @@ class PaperRetriever:
         self.filename = filename
         self.respect_robots_txt = respect_robots_txt
         self.suppress_on_403 = suppress_on_403
+        self.polite_mode = polite_mode
         self.user_agents = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15",
@@ -79,6 +80,7 @@ class PaperRetriever:
             user_agent=random.choice(self.user_agents),
             respect_robots_txt=respect_robots_txt,
             suppress_on_403=suppress_on_403,
+            polite_mode=polite_mode,
         )
  
     def download(self) -> Self:
@@ -540,6 +542,8 @@ def main() -> None:
                     help='Respect robots.txt directives and Crawl-Delay for all domains.')
     parser.add_argument('--no-suppress-403', action='store_true', default=False,
                     help='Disable automatic suppression of domains that return 403 Forbidden.')
+    parser.add_argument('--no-polite-mode', action='store_true', default=False,
+                    help='Disable polite mode (robots.txt compliance and rate limits).')
 
     args = parser.parse_args()
     args.allow_scihub = args.allow_scihub.lower() == 'true'
@@ -554,6 +558,7 @@ def main() -> None:
         allow_scihub=args.allow_scihub,
         respect_robots_txt=args.respect_robots_txt,
         suppress_on_403=not args.no_suppress_403,
+        polite_mode=not args.no_polite_mode,
     )
 
     retriever.download()

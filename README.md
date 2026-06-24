@@ -11,7 +11,13 @@
 **A python package for retrieving scientific papers from the web.** Inspired by PyPaperBot (https://github.com/ferru97/PyPaperBot) but with improved flexibility and extensibility. Prefers open-access sources but users can opt to use Sci-Hub as a fallback depending on their ethical considerations and local laws.
 
 ### Installation
-    
+
+```bash
+pip install pypaperretriever
+```
+
+Or install the latest development version directly from GitHub:
+
 ```bash
 pip install git+https://github.com/josephisaacturner/pypaperretriever.git
 ```
